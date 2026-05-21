@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import yaml
+except ImportError:  # pragma: no cover
+    yaml = None  # type: ignore[assignment]
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -40,6 +46,37 @@ KNOWN_WRITERS = CANDIDATE_ONLY_WRITERS | USER_WRITERS | {
 }
 
 DEDUP_COSINE_THRESHOLD = 0.92  # cosine sim above which we treat as duplicate
+
+# Default pattern when doctrine.config.yaml is unavailable.
+# Matches: transcript:<session-id>:turn_<n>  e.g. transcript:abc123:turn_7
+_DEFAULT_USER_TURN_PATTERN = r'^transcript:[a-z0-9-]+:turn_\d+$'
+
+_DOCTRINE_CONFIG_CACHE: dict | None = None
+_DOCTRINE_CONFIG_PATH = Path.home() / ".hermes" / "doctrine.config.yaml"
+
+
+def _load_doctrine_config() -> dict:
+    """Load and cache doctrine.config.yaml. Returns empty dict on any failure."""
+    global _DOCTRINE_CONFIG_CACHE
+    if _DOCTRINE_CONFIG_CACHE is not None:
+        return _DOCTRINE_CONFIG_CACHE
+    if yaml is None or not _DOCTRINE_CONFIG_PATH.exists():
+        _DOCTRINE_CONFIG_CACHE = {}
+        return _DOCTRINE_CONFIG_CACHE
+    try:
+        with _DOCTRINE_CONFIG_PATH.open("r", encoding="utf-8") as fh:
+            _DOCTRINE_CONFIG_CACHE = yaml.safe_load(fh) or {}
+    except Exception:  # noqa: BLE001
+        _DOCTRINE_CONFIG_CACHE = {}
+    return _DOCTRINE_CONFIG_CACHE
+
+
+def _user_turn_pattern() -> str:
+    """Return the compiled source_ref regex pattern for user_stated writes."""
+    cfg = _load_doctrine_config()
+    return cfg.get("memory", {}).get(
+        "user_turn_source_ref_pattern", _DEFAULT_USER_TURN_PATTERN
+    )
 
 
 class WriteRejected(Exception):
@@ -85,20 +122,39 @@ def _audit(store: MemoryStore, *, memory_id: str, op: str, who: str, why: str,
     }])
 
 
-def _assign_tier(writer: str, provenance: str) -> str:
-    """Tier based on writer + provenance.
+def _assign_tier(
+    writer: str, provenance: str, source_ref: str
+) -> tuple[str, str]:
+    """Tier based on writer + provenance + source_ref validation.
+
+    Returns (tier, demotion_reason).  demotion_reason is empty string when no
+    demotion occurred.
 
     Per injection-audit (2026-05-19): unknown writers MUST NOT achieve
     verified tier via provenance='user_stated'. Only known writers can
     claim user_stated; unknown writers default to probationary regardless.
+
+    A6 fix (2026-05-21): when provenance=='user_stated', source_ref MUST
+    match memory.user_turn_source_ref_pattern from doctrine.config.yaml.
+    Mismatch → demote to probationary (not reject — import merges need leniency).
     """
     if writer in CANDIDATE_ONLY_WRITERS:
-        return "candidate"
+        return "candidate", ""
+
+    if provenance == "user_stated":
+        pattern = _user_turn_pattern()
+        if not re.match(pattern, source_ref or ""):
+            reason = (
+                f"source_ref {source_ref!r} does not match user_turn_source_ref_pattern "
+                f"{pattern!r}; demoted from verified to probationary"
+            )
+            return "probationary", reason
+
     if writer in USER_WRITERS:
-        return "verified"
+        return "verified", ""
     if writer in KNOWN_WRITERS and provenance == "user_stated":
-        return "verified"
-    return "probationary"
+        return "verified", ""
+    return "probationary", ""
 
 
 def _find_dedup_candidate(store: MemoryStore, vector: list[float]) -> dict | None:
@@ -171,8 +227,8 @@ def write_memory(
     #     would otherwise resurface via retrieval months later.
     content, secrets_redacted = scrub_with_count(content)
 
-    # 2. Tier assignment
-    tier = _assign_tier(writer, provenance)
+    # 2. Tier assignment (includes source_ref pattern check for user_stated)
+    tier, tier_demotion_reason = _assign_tier(writer, provenance, source_ref)
     effective_confidence = confidence
 
     # 3. Filesystem grounding for code refs (demotion)
@@ -245,9 +301,15 @@ def write_memory(
     _audit(
         store, memory_id=rec.id, op="create", who=writer,
         why=f"new memory at tier={tier} from {source_ref}"
-            + (f" (scrubbed {secrets_redacted} secrets)" if secrets_redacted else ""),
-        after=json.dumps({"tier": tier, "provenance": provenance, "writer": writer,
-                          "secrets_redacted": secrets_redacted}),
+            + (f" (scrubbed {secrets_redacted} secrets)" if secrets_redacted else "")
+            + (f" [{tier_demotion_reason}]" if tier_demotion_reason else ""),
+        after=json.dumps({
+            "tier": tier,
+            "provenance": provenance,
+            "writer": writer,
+            "secrets_redacted": secrets_redacted,
+            **({"tier_demotion_reason": tier_demotion_reason} if tier_demotion_reason else {}),
+        }),
     )
 
     return rec.id

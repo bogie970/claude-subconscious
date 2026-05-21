@@ -61,13 +61,21 @@ def _format_xml(scored_memories: list, query_time_ms: int) -> str:
         tags_attr = ""
         if r.tags:
             tags_attr = f' tags="{_escape_xml(",".join(r.tags))}"'
-        # Surface tier+provenance per injection-audit (2026-05-19): the agent
-        # must be able to classify retrieved memories per doctrine §2 Class
-        # A/B/C/D before acting on them. Default empty if not in metadata.
+        # Surface all 5 doctrine §7.3 attrs per injection-audit (2026-05-19):
+        # tier, provenance, agent, writer, source_ref — agent can use these to
+        # classify memories per doctrine §2 Class A/B/C/D before acting on them.
+        # Default empty string if absent (pre-v2 rows or missing column).
         tier = r.metadata.get("_tier", "")
         provenance = r.metadata.get("_provenance", "")
+        writer = r.metadata.get("_writer", "")
+        source_ref = r.metadata.get("_source_ref", "")
+        # agent comes from the top-level `source` field (who wrote the memory)
+        agent = r.source or ""
         tier_attr = f' tier="{_escape_xml(tier)}"' if tier else ""
         prov_attr = f' provenance="{_escape_xml(provenance)}"' if provenance else ""
+        agent_attr = f' agent="{_escape_xml(agent)}"' if agent else ""
+        writer_attr = f' writer="{_escape_xml(writer)}"' if writer else ""
+        source_ref_attr = f' source_ref="{_escape_xml(source_ref)}"' if source_ref else ""
         lines.append(
             f'<memory id="{_escape_xml(r.id)}" '
             f'importance="{r.importance:.2f}" '
@@ -78,6 +86,9 @@ def _format_xml(scored_memories: list, query_time_ms: int) -> str:
             f'created="{created}"'
             f'{tier_attr}'
             f'{prov_attr}'
+            f'{agent_attr}'
+            f'{writer_attr}'
+            f'{source_ref_attr}'
             f'{tags_attr}>'
         )
         lines.append(_escape_xml(r.content))
