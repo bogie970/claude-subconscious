@@ -26,6 +26,14 @@ from memory.schema import MemoryRecord, ScoredMemory
 from memory.store import MemoryStore
 
 
+# A2 (Plan A Day 1): drop low-similarity candidates BEFORE min-max normalization.
+# Without this floor, min-max inflates noise (~0.2 raw similarity) to relevance=1.0
+# whenever ALL candidates are noise — TRACE-3 reproduced this live for the
+# "session compaction protocol" query (4/5 results were tier=candidate scratch).
+# Keep in sync with aisys/memory/pretooluse_memcheck.py SIM_FLOOR = 0.45.
+SIM_FLOOR = 0.45
+
+
 class TripleScoredRetriever:
     """Retrieves memories scored by relevance + recency + importance (Park et al. 2023)."""
 
@@ -117,6 +125,11 @@ class TripleScoredRetriever:
             memory_type_filter=memory_type_filter,
             include_archived=include_archived,
         )
+
+        # A2: low-similarity cutoff before normalization
+        candidates = [c for c in candidates if c.relevance >= SIM_FLOOR]
+        if not candidates:
+            return []
 
         raw = self._compute_raw_scores(candidates)
 

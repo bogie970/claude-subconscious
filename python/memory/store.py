@@ -106,6 +106,15 @@ class MemoryStore:
         self._lock = FileLock(f"{db_path}.lock", timeout=60)
         self._table = self._get_or_create_table()
         self._ensure_audit_table()
+        # A3 (Plan A Day 1): fail-loud if a v1-schema store slipped through.
+        # TRACE-3 showed v1 fallback silently drops the tier column —
+        # quarantine taxonomy invisible, every row injected as if verified.
+        if not self._has_v2_schema():
+            raise RuntimeError(
+                f"v1 schema fallback at {self._db.uri}/{TABLE_NAME} — "
+                "refusing to run. v2 columns missing. "
+                "Run migrations/migrate_v2.py to upgrade, or delete the table to recreate."
+            )
 
     def _ensure_audit_table(self):
         """Create memory_audit table eagerly. Prevents lazy-create race
@@ -117,7 +126,8 @@ class MemoryStore:
         try:
             return self._db.open_table(TABLE_NAME)
         except (FileNotFoundError, ValueError):
-            return self._db.create_table(TABLE_NAME, schema=LANCE_SCHEMA)
+            # A3 (Plan A Day 1): fresh installs use v2 schema directly.
+            return self._db.create_table(TABLE_NAME, schema=LANCE_SCHEMA_V2)
 
     def _has_v2_schema(self) -> bool:
         """Check if the underlying table has v2 columns (post-migration)."""
@@ -190,11 +200,16 @@ class MemoryStore:
         category_filter: str | None = None,
         memory_type_filter: str | None = None,
         include_archived: bool = False,
+        tier: tuple[str, ...] | None = ("verified", "probationary"),
     ) -> list[ScoredMemory]:
         """Vector similarity search with optional metadata filters.
 
         Returns ScoredMemory objects with only relevance (vector distance)
         populated. Use TripleScoredRetriever for full scoring.
+
+        A1 (Plan A Day 1): default tier filter excludes candidate AND tombstoned.
+        Pass tier=None to bypass (debug / memory_recall scope='archive' etc.).
+        Closes TRACE-3 candidate-tier injection AND the 351 tombstone leak.
         """
         query_vector = self._embedder.embed_one(query)
 
@@ -203,6 +218,9 @@ class MemoryStore:
         where_clauses = []
         if not include_archived:
             where_clauses.append("archived = false")
+        if tier is not None:
+            tier_list = ", ".join(f"'{_sanitize(t)}'" for t in tier)
+            where_clauses.append(f"tier IN ({tier_list})")
         if namespaces:
             ns_list = ", ".join(f"'{_sanitize(n)}'" for n in namespaces)
             where_clauses.append(f"namespace IN ({ns_list})")
