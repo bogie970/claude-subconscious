@@ -5,10 +5,15 @@
  * On every Stop event:
  *   1. Read transcript JSONL
  *   2. Diff against last processed index
- *   3. Write payload JSON
+ *   3. Write payload JSON  (coalesces with existing unprocessed payload — 2026-05-22)
  *   4. Spawn local Python worker (subconscious) detached
  *
  * No Letta cloud calls. No LETTA_API_KEY required.
+ *
+ * Coalescing (2026-05-22): if there is an existing unprocessed payload for
+ * this session (no active lease), merge the new content into it instead of
+ * writing a new file. This caps pending-payload count at 1 per session and
+ * prevents the accumulation pattern that produced 20+ files for one session.
  */
 
 import * as fs from 'fs';
@@ -40,6 +45,12 @@ const __dirname = path.dirname(__filename);
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'send_messages.log');
 
+// --- Coalescing constants (2026-05-22) ---------------------------------------
+// Matches local_worker.py _LEASE_TTL_SECONDS. Keep in sync.
+const LEASE_TTL_SECONDS = 300;
+// Max merged payload size before we split and write a new one.
+const MAX_PAYLOAD_BYTES = 5 * 1024 * 1024;  // 5 MB
+
 interface HookInput {
   session_id: string;
   transcript_path: string;
@@ -48,15 +59,29 @@ interface HookInput {
   hook_event_name?: string;
 }
 
+interface LocalPayload {
+  sessionId: string;
+  cwd: string;
+  stateFile: string;
+  newLastProcessedIndex: number;
+  transcriptXml: string;
+}
+
+interface LeaseFile {
+  pid: number;
+  started_at_epoch: number;
+  ttl_seconds?: number;
+  host?: string;
+}
+
 function ensureLogDir(): void {
   if (!fs.existsSync(TEMP_STATE_DIR)) {
     fs.mkdirSync(TEMP_STATE_DIR, { recursive: true });
   }
 }
 
-const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const LOG_MAX_BYTES = 10 * 1024 * 1024;
 
-// Rotate at process start: if existing log exceeds threshold, move to .log.1
 function rotateLogIfNeeded(): void {
   try {
     ensureLogDir();
@@ -87,6 +112,85 @@ async function readHookInput(): Promise<HookInput> {
   const v = await readBoundedStdinJson<HookInput>(30000);
   if (!v) throw new Error('empty or oversized stdin');
   return v;
+}
+
+// --- Coalescing helpers (2026-05-22) -----------------------------------------
+
+function pidAlive(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e: any) {
+    // EPERM means process exists but we can't signal — still alive
+    return e?.code === 'EPERM';
+  }
+}
+
+function leaseIsActive(leasePath: string): boolean {
+  if (!fs.existsSync(leasePath)) return false;
+  try {
+    const lease: LeaseFile = JSON.parse(fs.readFileSync(leasePath, 'utf-8'));
+    const ttl = lease.ttl_seconds ?? LEASE_TTL_SECONDS;
+    const ageSec = (Date.now() / 1000) - (lease.started_at_epoch ?? 0);
+    if (ageSec > ttl) return false;  // expired
+    return pidAlive(lease.pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find an existing unprocessed payload for this session that no worker
+ * is actively processing. Returns the path or null.
+ */
+function findCoalescePayload(sessionId: string): string | null {
+  try {
+    const entries = fs.readdirSync(TEMP_STATE_DIR);
+    const prefix = `local-payload-${sessionId}-`;
+    const candidates = entries
+      .filter(e => e.startsWith(prefix) && e.endsWith('.json'))
+      .map(e => path.join(TEMP_STATE_DIR, e))
+      .filter(p => !leaseIsActive(p + '.lease'));
+    if (candidates.length === 0) return null;
+    // Prefer oldest — drains accumulated payloads in order.
+    candidates.sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs);
+    return candidates[0];
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Coalesce new payload content into an existing one. Append transcriptXml,
+ * keep the higher newLastProcessedIndex. Returns true on success.
+ */
+function coalesceInto(existingPath: string, newPayload: LocalPayload): boolean {
+  try {
+    const existing: LocalPayload = JSON.parse(fs.readFileSync(existingPath, 'utf-8'));
+    // Don't grow unboundedly — if merged would exceed MAX_PAYLOAD_BYTES, refuse coalesce
+    // and let the caller write a new payload.
+    const mergedXml = existing.transcriptXml + newPayload.transcriptXml;
+    if (Buffer.byteLength(mergedXml, 'utf-8') > MAX_PAYLOAD_BYTES) {
+      log(`Coalesce refused — merged payload would exceed ${MAX_PAYLOAD_BYTES} bytes`);
+      return false;
+    }
+    const merged: LocalPayload = {
+      sessionId: existing.sessionId,
+      cwd: existing.cwd,
+      stateFile: existing.stateFile,
+      newLastProcessedIndex: Math.max(existing.newLastProcessedIndex, newPayload.newLastProcessedIndex),
+      transcriptXml: mergedXml,
+    };
+    // Atomic write via tmp + rename
+    const tmpPath = existingPath + '.tmp.' + process.pid;
+    fs.writeFileSync(tmpPath, JSON.stringify(merged), 'utf-8');
+    fs.renameSync(tmpPath, existingPath);
+    return true;
+  } catch (e) {
+    log(`Coalesce failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
 }
 
 async function main(): Promise<void> {
@@ -147,7 +251,7 @@ async function main(): Promise<void> {
     const transcriptXml = formatAsXmlTranscript(newMessages);
     const stateFile = getSyncStateFile(hookInput.cwd, hookInput.session_id);
 
-    const localPayload = {
+    const localPayload: LocalPayload = {
       sessionId: hookInput.session_id,
       cwd: hookInput.cwd,
       stateFile,
@@ -155,9 +259,21 @@ async function main(): Promise<void> {
       transcriptXml,
     };
 
-    const payloadFile = path.join(TEMP_STATE_DIR, `local-payload-${hookInput.session_id}-${Date.now()}.json`);
-    fs.writeFileSync(payloadFile, JSON.stringify(localPayload), 'utf-8');
-    log(`Wrote local payload to ${payloadFile} (${transcriptXml.length} chars XML)`);
+    // --- Coalescing (2026-05-22) ------------------------------------------
+    // If there's an existing unprocessed payload for this session (no active
+    // lease — previous worker died, hit cap, or was killed), merge into it
+    // instead of creating a new file. Caps pending-payload count at 1/session.
+
+    let payloadFile: string;
+    const coalesceTarget = findCoalescePayload(hookInput.session_id);
+    if (coalesceTarget && coalesceInto(coalesceTarget, localPayload)) {
+      payloadFile = coalesceTarget;
+      log(`Coalesced into existing payload ${payloadFile} (${transcriptXml.length} new XML chars merged)`);
+    } else {
+      payloadFile = path.join(TEMP_STATE_DIR, `local-payload-${hookInput.session_id}-${Date.now()}.json`);
+      fs.writeFileSync(payloadFile, JSON.stringify(localPayload), 'utf-8');
+      log(`Wrote NEW local payload to ${payloadFile} (${transcriptXml.length} chars XML)`);
+    }
 
     const workerScript = path.join(__dirname, 'local_worker.py');
     const pythonCmd = hermesConfig.pythonPath;
