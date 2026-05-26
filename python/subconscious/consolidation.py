@@ -49,6 +49,13 @@ Output a JSON array (no markdown fences). Each element:
   "tags": ["tag1", "tag2"]
 }}
 
+DO NOT EXTRACT (return nothing for content that is only these):
+- Raw command/tool output, shell output, logs, stack traces (verbatim pastes)
+- Single-point telemetry (GPU temp now, disk usage right now, "Updated task #N", heartbeats)
+- Source-code or file-content pastes (facts ABOUT code are fine, the code itself is not)
+- Tool/system placeholders and truncated fragments that do not carry a complete claim
+- Single transient events that should not persist (one boot timestamp, one TLS error, session IDs)
+
 If there is nothing worth extracting, return an empty array: []
 
 CONVERSATION:

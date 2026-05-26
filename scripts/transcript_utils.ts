@@ -197,14 +197,17 @@ export function formatMessagesForLetta(
       }
 
       // Tool results (these come in user messages)
+      // Successful results are dropped: the tool-use stub already records the action,
+      // and raw output (file reads, command output, logs) is the primary extractor-noise
+      // source. Errors are kept as a terse one-liner — they are signal without the dump.
       for (const toolResult of extracted.toolResults) {
-        const toolName = toolNameMap.get(toolResult.toolName) || toolResult.toolName;
-        const prefix = toolResult.isError ? '[Tool Error' : '[Tool Result';
-        const truncatedContent = truncate(toolResult.content, 1500);
-        formatted.push({
-          role: 'system',
-          text: `${prefix}: ${toolName}]\n${truncatedContent}`,
-        });
+        if (toolResult.isError) {
+          const toolName = toolNameMap.get(toolResult.toolName) || toolResult.toolName;
+          formatted.push({
+            role: 'system',
+            text: `[Tool Error: ${toolName}]`,
+          });
+        }
         toolResultCount++;
       }
     }
