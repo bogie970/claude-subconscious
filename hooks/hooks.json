@@ -42,6 +42,11 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/sync_letta_memory.ts\"",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python.exe \"C:/Users/jbogi/claude-nodes/hermes/aisys/memory/project_context.py\"",
+            "timeout": 5
           }
         ]
       }
