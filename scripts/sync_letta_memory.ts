@@ -283,6 +283,35 @@ function retrieveMemories(prompt: string, cwd: string): string {
 }
 
 /**
+ * ADDITIVE LOGGING (steward S1 shadow). Record the memory ids this live
+ * injector actually chose this turn so steward_inject.py can compare its
+ * pre-computed window against the truth ("hooks_injected_ids"). This parses
+ * the SAME `retrievedXml` we already emit and writes it to a side file — it
+ * does NOT change `retrievedXml`, `outputs`, or anything the agent sees.
+ * Fully swallowed: a logging failure must never affect the injection.
+ */
+function recordHookInjection(retrievedXml: string): void {
+  try {
+    const ids: string[] = [];
+    // <memory id="..."> emitted by memory.query_retrieve
+    const re = /<memory\s+id="([^"]*)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(retrievedXml)) !== null) {
+      ids.push(m[1]);
+    }
+    const runtimeDir = path.join(os.homedir(), '.hermes', 'runtime');
+    if (!fs.existsSync(runtimeDir)) fs.mkdirSync(runtimeDir, { recursive: true });
+    const out = path.join(runtimeDir, 'last_hook_injection.json');
+    const record = { ts: new Date().toISOString(), count: ids.length, ids };
+    const tmp = out + '.tmp.' + process.pid;
+    fs.writeFileSync(tmp, JSON.stringify(record), 'utf-8');
+    fs.renameSync(tmp, out);  // atomic replace — reader sees whole-or-nothing
+  } catch {
+    // never let shadow logging affect the live injector
+  }
+}
+
+/**
  * Surface unread hook errors as <hook_error> tags. Tracks cursor in
  * hook_errors.cursor so each entry is shown exactly once. All errors
  * swallowed — this must NEVER raise into the calling hook.
@@ -421,6 +450,10 @@ async function main(): Promise<void> {
     // L2 vector store retrieval
     if (hookInput?.prompt) {
       const retrievedXml = retrieveMemories(hookInput.prompt, cwd);
+      // ADDITIVE (steward S1 shadow): log the chosen ids before the unchanged
+      // emit path. Records [] when nothing was retrieved, so the shadow compare
+      // sees the true injected set every turn. Does NOT alter outputs.
+      recordHookInjection(retrievedXml);
       if (retrievedXml) {
         outputs.push(retrievedXml);
       }

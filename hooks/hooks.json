@@ -47,6 +47,11 @@
             "type": "command",
             "command": "python.exe \"C:/Users/jbogi/claude-nodes/hermes/aisys/memory/project_context.py\"",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "python.exe \"C:/Users/jbogi/claude-nodes/hermes/aisys/memory/steward_inject.py\"",
+            "timeout": 5
           }
         ]
       }
@@ -58,6 +63,12 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/send_messages_to_letta.ts\"",
+            "timeout": 120,
+            "async": true
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/dispatch_steward.ts\"",
             "timeout": 120,
             "async": true
           },
