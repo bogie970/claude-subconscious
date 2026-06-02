@@ -229,6 +229,52 @@ function consumeL1Markers(cwd: string): string[] {
 }
 
 /**
+ * Resolve the steward injector mode, MIRRORING aisys/memory/steward_inject.py
+ * `_resolve_mode()` precedence EXACTLY (first wins):
+ *   1. env STEWARD_INJECT_MODE
+ *   2. ~/.hermes/steward.config.yaml  ->  inject_mode: <off|shadow|live>
+ *   3. default: "off"
+ *
+ * Why this lives here: when steward is in `live` mode it injects its own
+ * <steward_window> (via the steward_inject.py UserPromptSubmit hook). Running
+ * query_retrieve here too would DOUBLE-inject retrieved memory every turn. This
+ * helper lets us skip query_retrieve when steward is the live source.
+ *
+ * No YAML dependency is added: steward.config.yaml is a flat file whose only
+ * meaningful key is `inject_mode:`, so we line-scan for it. If the file ever
+ * grows nested structure this stays correct as long as `inject_mode` remains a
+ * top-level scalar (it is the canonical contract in steward.config.yaml).
+ *
+ * Fail-open to "off" on ANY error (matches the Python side): if we cannot tell
+ * whether steward is live, we keep query_retrieve running so the agent is never
+ * left with NO retrieved-memory injector.
+ */
+function stewardInjectMode(): 'off' | 'shadow' | 'live' {
+  const VALID = new Set(['off', 'shadow', 'live']);
+  try {
+    const env = (process.env.STEWARD_INJECT_MODE || '').trim().toLowerCase();
+    if (VALID.has(env)) return env as 'off' | 'shadow' | 'live';
+
+    const cfgPath = path.join(os.homedir(), '.hermes', 'steward.config.yaml');
+    if (fs.existsSync(cfgPath)) {
+      const raw = fs.readFileSync(cfgPath, 'utf-8');
+      for (const line of raw.split(/\r?\n/)) {
+        const m = line.match(/^\s*inject_mode\s*:\s*([A-Za-z]+)/);
+        if (m) {
+          // strip inline comments / quotes already excluded by [A-Za-z]+
+          const val = m[1].trim().toLowerCase();
+          if (VALID.has(val)) return val as 'off' | 'shadow' | 'live';
+          break; // found the key but value invalid -> fall through to default
+        }
+      }
+    }
+  } catch {
+    // fall through to default
+  }
+  return 'off';
+}
+
+/**
  * Retrieve query-dependent memories from LanceDB vector store.
  * Calls Python subprocess: memory.query_retrieve
  */
@@ -447,15 +493,33 @@ async function main(): Promise<void> {
       }
     }
 
-    // L2 vector store retrieval
+    // L2 vector store retrieval.
+    //
+    // RETIREMENT GATE (2026-06-01): when steward is in `live` inject_mode it
+    // injects its own <steward_window> (curated working_set) every turn via the
+    // steward_inject.py UserPromptSubmit hook. Running query_retrieve here too
+    // would DOUBLE-inject retrieved memory. So when steward is live we SKIP
+    // query_retrieve and become a no-op for this section. steward is the SOLE
+    // retrieved-memory injector.
+    //
+    // We still write a truthful EMPTY last_hook_injection.json so that if the
+    // operator later flips steward back to `shadow`, its shadow-compare reads a
+    // correct (empty) "hooks_injected_ids" instead of a stale set from when
+    // query_retrieve was last active. recordHookInjection('') parses to [].
     if (hookInput?.prompt) {
-      const retrievedXml = retrieveMemories(hookInput.prompt, cwd);
-      // ADDITIVE (steward S1 shadow): log the chosen ids before the unchanged
-      // emit path. Records [] when nothing was retrieved, so the shadow compare
-      // sees the true injected set every turn. Does NOT alter outputs.
-      recordHookInjection(retrievedXml);
-      if (retrievedXml) {
-        outputs.push(retrievedXml);
+      const mode = stewardInjectMode();
+      if (mode === 'live') {
+        debug('steward inject_mode=live -> skipping query_retrieve (steward is sole injector)');
+        recordHookInjection(''); // truthful empty set
+      } else {
+        const retrievedXml = retrieveMemories(hookInput.prompt, cwd);
+        // ADDITIVE (steward S1 shadow): log the chosen ids before the unchanged
+        // emit path. Records [] when nothing was retrieved, so the shadow compare
+        // sees the true injected set every turn. Does NOT alter outputs.
+        recordHookInjection(retrievedXml);
+        if (retrievedXml) {
+          outputs.push(retrievedXml);
+        }
       }
     }
 
@@ -490,6 +554,26 @@ async function main(): Promise<void> {
     const finalOutput = outputs.join('\n\n');
     debug('Final output length:', finalOutput.length, 'chars');
     console.log(finalOutput);
+
+    // ── Inspector v1 (hermes 2026-05-30): per-fire token accounting log ──
+    // Append a record of THIS hook fire to ~/.hermes/logs/hook_injections.jsonl
+    // so the Iris Window Inspector can show the REAL hook contribution to the
+    // prompt (currently invisible — counted in "uncounted overhead"). Pure
+    // observability; output to Claude unchanged. Fail-soft on every step.
+    try {
+      const tokensEmitted = Math.max(1, Math.floor(finalOutput.length / 4));
+      const logDir = path.join(os.homedir(), '.hermes', 'logs');
+      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+      const logPath = path.join(logDir, 'hook_injections.jsonl');
+      const rec = {
+        ts: new Date().toISOString(),
+        hook_name: 'sync_letta_memory',
+        tokens_emitted: tokensEmitted,
+        char_count: finalOutput.length,
+        sections: outputs.length,
+      };
+      fs.appendFileSync(logPath, JSON.stringify(rec) + '\n', 'utf-8');
+    } catch { /* never let logging affect the hook */ }
 
     if (state && sessionId) {
       saveSyncState(cwd, state);
