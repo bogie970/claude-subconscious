@@ -23,6 +23,11 @@ filelock>=3.15
 # HTTP — Ollama client, embed daemon, healthchecks
 requests>=2.31
 
+# HTTP/2 — required by steward_proxy.py so the upstream httpx.AsyncClient(http2=True)
+# negotiates h2 to api.anthropic.com (matches Claude Code's transport; MUST-FIX M2).
+# Without this, httpx silently falls back to HTTP/1.1 — the one transport tell worth fixing.
+h2>=4.1
+
 # MCP server (memory_server.py exposes memory_search / memory_save tools)
 mcp>=1.0
 
