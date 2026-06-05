@@ -79,8 +79,7 @@ def run_loop(
         f"1. Extract user preferences and patterns → memory_insert or memory_rethink\n"
         f"2. Note project context and decisions → memory_insert or memory_rethink\n"
         f"3. Track unfinished work and TODOs → memory_insert into pending_items\n"
-        f"4. If you have time-sensitive advice for Claude → send_whisper\n"
-        f"5. If nothing noteworthy, say so without calling any tools.\n"
+        f"4. If nothing noteworthy, say so without calling any tools.\n"
         f"</instructions>\n"
         f"</claude_code_session_update>"
     )
@@ -215,7 +214,7 @@ def _parse_content_tool_calls(content: str) -> list[dict[str, Any]]:
         return []
 
     calls = []
-    valid_names = {"memory_replace", "memory_insert", "memory_rethink", "send_whisper", "conversation_search"}
+    valid_names = {"memory_replace", "memory_insert", "memory_rethink", "conversation_search"}
     i = 0
     while i < len(content):
         idx = content.find("{", i)

@@ -98,28 +98,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "send_whisper",
-            "description": (
-                "Send a short, one-time message to Claude Code. Use for time-sensitive "
-                "observations that don't belong in persistent memory blocks. The message "
-                "appears once in Claude's context on the next user prompt, then is deleted. "
-                "Max 500 characters. Use sparingly."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {
-                        "type": "string",
-                        "description": "The whisper message. Concise, actionable, max 500 chars.",
-                    },
-                },
-                "required": ["text"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "conversation_search",
             "description": (
                 "Search the long-term vector memory for past observations, decisions, "
@@ -187,16 +165,6 @@ def execute_tool(
         if ok:
             return f"Rewrote [{label}] completely."
         return f"Failed: new content exceeds character limit for [{label}]."
-
-    elif name == "send_whisper":
-        text = args.get("text", "").strip()
-        if not text:
-            return "Error: empty whisper text."
-        if len(text) > 500:
-            return f"Error: whisper too long ({len(text)} chars, max 500)."
-        from .whispers import write_whisper
-        write_whisper(store.path.parent, text)
-        return "Whisper queued for next sync."
 
     elif name == "conversation_search":
         return _handle_conversation_search(args, memory_store)

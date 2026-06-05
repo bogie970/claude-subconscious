@@ -1,6 +1,7 @@
 /**
- * Local file-based pattern store + whisper queue.
- * Loads/saves the 5 letta-style pattern blocks and consumes one-shot whispers.
+ * Local file-based pattern store.
+ * Loads/saves the 5 letta-style pattern blocks.
+ * (The one-shot whisper queue was retired 2026-06-04.)
  */
 
 import * as fs from 'fs';
@@ -98,49 +99,6 @@ export function getLocalConversationId(sessionId: string): string {
   return `local-conv-${hash}`;
 }
 
-interface Whisper {
-  id: string;
-  text: string;
-  timestamp: string;
-  priority: string;
-}
-
-/**
- * Read and consume whisper messages. Returns whispers and deletes the file.
- * Once-only delivery: reading = consuming.
- */
-export function consumeWhispers(cwd: string): Whisper[] {
-  const home = process.env.LETTA_HOME
-    ? expandHome(process.env.LETTA_HOME)
-    : cwd;
-  const whispersPath = path.join(home, '.letta', 'claude', 'whispers.json');
-
-  if (!fs.existsSync(whispersPath)) {
-    return [];
-  }
-
-  // Atomic consume: rename first, then read from the renamed copy.
-  // Prevents race where Python writes between our read and unlink.
-  const tmpPath = whispersPath + `.consuming-${process.pid}`;
-  try {
-    fs.renameSync(whispersPath, tmpPath);
-  } catch {
-    return [];
-  }
-
-  try {
-    const raw = JSON.parse(fs.readFileSync(tmpPath, 'utf-8'));
-    try { fs.unlinkSync(tmpPath); } catch {}
-    if (!Array.isArray(raw) || raw.length === 0) {
-      return [];
-    }
-    const validated = raw.filter((w: any) =>
-      w && typeof w.text === 'string' && w.text.length > 0 &&
-      typeof w.id === 'string' && typeof w.timestamp === 'string'
-    );
-    return validated.slice(0, 20);
-  } catch {
-    try { fs.unlinkSync(tmpPath); } catch {}
-    return [];
-  }
-}
+// The subconscious "whisper" feature (consumeWhispers + whispers.json queue)
+// was retired 2026-06-04. The steward now occupies a real context-window slot.
+// Do NOT re-introduce a whisper consumer here.

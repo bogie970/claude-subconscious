@@ -162,7 +162,7 @@ def _parse_json_tool_calls(content: str) -> list[dict[str, Any]]:
     if not content.startswith("["):
         return []
 
-    valid_names = {"memory_replace", "memory_insert", "memory_rethink", "send_whisper", "conversation_search"}
+    valid_names = {"memory_replace", "memory_insert", "memory_rethink", "conversation_search"}
 
     try:
         arr = json.loads(content)

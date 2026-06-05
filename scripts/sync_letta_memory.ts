@@ -5,7 +5,8 @@
  * Injects on every prompt:
  *   1. Memory block diff (5 letta-style blocks, now "patterns" layer)
  *   2. L2 retrieval (vector search via memory.query_retrieve)
- *   3. Whispers (one-shot observations from subconscious worker)
+ *
+ * (The subconscious "whisper" injection was retired 2026-06-04.)
  *
  * No Letta cloud calls. No LETTA_API_KEY required.
  */
@@ -31,7 +32,7 @@ import {
   getTempStateDir,
   recordHookError,
 } from './conversation_utils.ts';
-import { getLocalAgent, consumeWhispers } from './local_store.ts';
+import { getLocalAgent } from './local_store.ts';
 import { getConfig } from './config.ts';
 
 const hermesConfig = getConfig();
@@ -530,20 +531,7 @@ async function main(): Promise<void> {
       outputs.push(`<instruction>L1 manager evicted ${markers.length} chunk-block(s) above. Use memory_recall(query, scope="l1_evict") if you need details from the evicted content.</instruction>`);
     }
 
-    // Whispers — one-shot observations from subconscious worker
-    const whispers = consumeWhispers(cwd);
-    debug('Whispers consumed:', whispers.length);
-    if (whispers.length > 0) {
-      const formatted = whispers.map(w => {
-        const escapedText = escapeXmlContent(w.text);
-        const escapedId = escapeXmlContent(w.id);
-        const escapedTs = escapeXmlContent(w.timestamp);
-        return `<subconscious_whisper id="${escapedId}" timestamp="${escapedTs}">\n${escapedText}\n</subconscious_whisper>`;
-      }).join('\n');
-      outputs.push(formatted);
-      const wCount = whispers.length === 1 ? '1 whisper' : `${whispers.length} whispers`;
-      outputs.push(`<instruction>Your Subconscious sent ${wCount} above. These are one-time observations — acknowledge briefly inline, e.g. "Sub whispers: [key point]".</instruction>`);
-    }
+    // (Subconscious whisper injection retired 2026-06-04.)
 
     // Surface any silent hook errors recorded since last prompt
     const hookErrorOutput = surfaceHookErrors();

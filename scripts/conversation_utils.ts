@@ -184,7 +184,7 @@ export function formatAllBlocksForStdout(agent: Agent, conversationId: string | 
   const blocks = agent.blocks;
 
   const header = `<hermes_context>
-Hermes Memory is observing this session — patterns, vector memory, and one-shot whispers will surface inline.
+Hermes Memory is observing this session — patterns and vector memory will surface inline.
 Storage: LanceDB (cross-session) + pattern blocks (file-backed).
 </hermes_context>`;
 
