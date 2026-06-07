@@ -25,6 +25,7 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
@@ -215,6 +216,71 @@ async function readHookInput(): Promise<HookInput> {
   return v;
 }
 
+// --- ping-not-spawn signal path (Step 1, flag-gated, fail-open) ---------------
+// SYSTEM_REFINE Step 1 (steward.md §7 2026-06-06 LOCKED): instead of spawning a
+// fresh `python -m lcw.steward.runner`, POST the SAME payload to the always-on
+// backend, which runs the compile on a side thread. The mode is selected by
+// STEWARD_DISPATCH (default "spawn" = today's behavior, ZERO change unless set
+// to "signal"). When "signal", a POST failure/timeout/connection-refused
+// FAILS-OPEN to the spawn path so the steward ALWAYS runs.
+
+const STEWARD_BACKEND_URL = 'http://127.0.0.1:7777/v1/steward/signal';
+const SIGNAL_TIMEOUT_MS = 1500;  // short — fire-and-forget; backend returns 202 fast.
+
+function getDispatchMode(): 'spawn' | 'signal' {
+  const raw = (process.env.STEWARD_DISPATCH || '').trim().toLowerCase();
+  return raw === 'signal' ? 'signal' : 'spawn';  // default + any junk = spawn.
+}
+
+function loadLcwToken(): string | null {
+  // Token lives in ~/.hermes/lcw_token.json — shape {"token":"<urlsafe>"}.
+  try {
+    const tokenPath = path.join(os.homedir(), '.hermes', 'lcw_token.json');
+    if (!fs.existsSync(tokenPath)) return null;
+    const v = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+    const tok = typeof v?.token === 'string' ? v.token.trim() : '';
+    return tok || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST the payload to the always-on backend (fire-and-forget). Returns true on a
+ * 2xx (steward accepted), false on ANY failure — caller fails-open to spawn.
+ */
+async function signalBackend(payload: StewardPayload): Promise<boolean> {
+  const token = loadLcwToken();
+  if (!token) {
+    log('signal: no bearer token at ~/.hermes/lcw_token.json — fail-open to spawn');
+    return false;
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SIGNAL_TIMEOUT_MS);
+  try {
+    const res = await fetch(STEWARD_BACKEND_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (res.status >= 200 && res.status < 300) {
+      log(`signal: backend accepted (HTTP ${res.status}) — no spawn`);
+      return true;
+    }
+    log(`signal: backend returned HTTP ${res.status} — fail-open to spawn`);
+    return false;
+  } catch (e) {
+    log(`signal: POST failed (${e instanceof Error ? e.message : String(e)}) — fail-open to spawn`);
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function main(): Promise<void> {
   log('='.repeat(60));
   log('dispatch_steward started');
@@ -273,6 +339,21 @@ async function main(): Promise<void> {
       );
       fs.writeFileSync(payloadFile, JSON.stringify(payload), 'utf-8');
       log(`Wrote NEW steward payload ${payloadFile} (${turns.length} turns)`);
+    }
+
+    // ── ping-not-spawn (Step 1) ──────────────────────────────────────────────
+    // When STEWARD_DISPATCH=signal, ping the always-on backend instead of
+    // spawning. Fail-open: any POST failure falls through to the spawn path
+    // below so the steward STILL runs. Default (unset/spawn) skips this entirely
+    // → byte-identical to today.
+    if (getDispatchMode() === 'signal') {
+      const ok = await signalBackend(payload);
+      if (ok) {
+        saveLastIndex(hookInput.session_id, newLastProcessedIndex);
+        log('Signalled backend steward (no spawn) — done');
+        process.exit(0);
+      }
+      log('Signal failed — falling open to spawn path');
     }
 
     // Spawn the runner detached: `python -m lcw.steward.runner <payload>`.
