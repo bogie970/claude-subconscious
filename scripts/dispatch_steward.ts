@@ -77,6 +77,38 @@ interface StewardPayload {
   // dispatch bookkeeping (ignored by runner.py — it only reads the keys above)
   sessionId: string;
   newLastProcessedIndex: number;
+  // runner.py uses this to load the full recent JSONL tail via
+  // _load_recent_transcript_tail(), giving _pack_conversation the complete
+  // recent conversation instead of just the incremental delta turns.
+  transcript_path: string;
+  // AGENT IDENTITY (the fix): which node this Stop hook fired in. runner.py
+  // uses this to select BOTH the L1 transcript source and the output window
+  // file (steward_window.<agent>.json). Without it every agent compiled as
+  // "hermes" and only steward_window.json ever refreshed on a Stop hook —
+  // peer windows (.atlas / .daedalus) only updated on the voice-checkout path.
+  agent: string;
+}
+
+// The three peer nodes each run claude.exe rooted at
+// C:/Users/jbogi/claude-nodes/<node>; their session JSONLs live under
+// ~/.claude/projects/C--Users-jbogi-claude-nodes-<node>/ . Both the cwd and the
+// transcript_path therefore carry the node slug. We derive it from whichever is
+// available, validate against the known set, and fall back to 'hermes' ONLY if
+// genuinely underivable (keeps the historical default-path behavior).
+const KNOWN_AGENTS = new Set(['hermes', 'atlas', 'daedalus']);
+
+function deriveAgent(cwd: string | undefined, transcriptPath: string | undefined): string {
+  for (const raw of [cwd, transcriptPath]) {
+    if (!raw) continue;
+    const s = raw.replace(/\\/g, '/').toLowerCase();
+    // Direct cwd form: .../claude-nodes/<node>/...
+    let m = s.match(/claude-nodes\/([a-z0-9_-]+)/);
+    if (m && KNOWN_AGENTS.has(m[1])) return m[1];
+    // CC project-dir form: .../C--Users-jbogi-claude-nodes-<node>/...
+    m = s.match(/claude-nodes-([a-z0-9_]+)/);
+    if (m && KNOWN_AGENTS.has(m[1])) return m[1];
+  }
+  return 'hermes';
 }
 
 function ensureLogDir(): void {
@@ -173,6 +205,11 @@ function coalesceInto(existingPath: string, fresh: StewardPayload): boolean {
       events: (existing.events || []).concat(fresh.events || []),
       sessionId: existing.sessionId,
       newLastProcessedIndex: Math.max(existing.newLastProcessedIndex, fresh.newLastProcessedIndex),
+      // Fresh path wins: it's the same live JSONL but we want the newest ref.
+      transcript_path: fresh.transcript_path || existing.transcript_path,
+      // Agent identity is stable across a session — preserve it through coalesce
+      // (fresh wins; both should agree since it's the same node/session).
+      agent: fresh.agent || existing.agent || 'hermes',
     };
     if (Buffer.byteLength(JSON.stringify(merged), 'utf-8') > MAX_PAYLOAD_BYTES) {
       log(`Coalesce refused — merged payload exceeds ${MAX_PAYLOAD_BYTES} bytes`);
@@ -324,7 +361,17 @@ async function main(): Promise<void> {
       events: [],
       sessionId: hookInput.session_id,
       newLastProcessedIndex,
+      // Pass the live JSONL path so runner.py can load the full recent tail
+      // via _load_recent_transcript_tail().  This fixes the bug where
+      // _pack_conversation only received the incremental delta turns (not the
+      // full recent 30-turn window), leaving conversation.items nearly empty
+      // and breaking voice-session continuity.
+      transcript_path: hookInput.transcript_path,
+      // Carry agent identity so runner.py writes THIS node's window file
+      // (steward_window.<agent>.json) instead of defaulting every node to hermes.
+      agent: deriveAgent(hookInput.cwd, hookInput.transcript_path),
     };
+    log(`Derived agent=${payload.agent} (cwd=${hookInput.cwd})`);
 
     // Coalesce into an existing pending payload, else write a new one.
     let payloadFile: string;
