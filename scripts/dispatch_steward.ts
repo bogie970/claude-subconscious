@@ -261,7 +261,16 @@ async function readHookInput(): Promise<HookInput> {
 // to "signal"). When "signal", a POST failure/timeout/connection-refused
 // FAILS-OPEN to the spawn path so the steward ALWAYS runs.
 
-const STEWARD_BACKEND_URL = 'http://127.0.0.1:7777/v1/steward/signal';
+// STEWARD DECOUPLE cutover knob (2026-06-09): the signal target is read from
+// STEWARD_SIGNAL_URL, DEFAULTING to the backend (:7777) so live behavior is
+// UNCHANGED until cutover. At cutover Hermes sets
+//   STEWARD_SIGNAL_URL=http://127.0.0.1:7778/v1/steward/signal
+// to point the hook straight at the standalone daemon. The existing
+// fail-open-to-spawn (below) is intact at either target — a daemon/backend outage
+// still spawns the runner, so no signal is ever dropped.
+const STEWARD_BACKEND_URL =
+  (process.env.STEWARD_SIGNAL_URL || '').trim() ||
+  'http://127.0.0.1:7777/v1/steward/signal';
 const SIGNAL_TIMEOUT_MS = 1500;  // short — fire-and-forget; backend returns 202 fast.
 
 function getDispatchMode(): 'spawn' | 'signal' {
