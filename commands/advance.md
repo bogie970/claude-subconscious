@@ -7,7 +7,8 @@ Advance the active project. The BOOKENDS are non-negotiable (they prevent drift)
 ## RIGID — always, no exceptions (the anti-drift guarantee)
 - **OPEN: Load the plan.** Read `~/.<node>/active_project` -> read the FULL project doc from this node's registry (`lcw/projects/<slug>.md` for hermes, `projects/<slug>.md` for other nodes). State the current milestone + open questions. No active project -> stop, tell user to `/project <slug>`.
 - **Only do work that is in the plan.** If the work isn't in the plan, it goes INTO the plan first (or gets flagged to Jacob) — never freestyled around it.
-- **CLOSE: Update the plan.** After work: update §4 Current state, §6 Tasks, §7 Increment log. Trace what changed to which milestone. Surface anything needing Jacob's ruling; never lock a decision without his okay.
+- **CLOSE: Update the plan + APPEND to the log.** After work: update §4 Current state, §6 Tasks, and **APPEND one entry to §7** — the project's COMPLETE, append-only history (what changed, why, the outcome). Trace what changed to which milestone. Surface anything needing Jacob's ruling; never lock a decision without his okay.
+- **PROJECT LOG DOCTRINE (the anti-cycle memory).** §7 is the project's full unabridged history. **Never load it whole into context — but append to it every single time work lands.** When you find yourself LOOPING or hitting the same error pattern, **SKIM the §7 log** to see where you've already been and stop repeating it. *The falcon must always hear the falconer:* each iteration, check alignment against the log + plan before advancing.
 
 ## TRIAGE — pick the depth (do this right after loading the plan)
 Assess the focus on two axes — **clarity** (is the approach already obvious?) and **stakes** (live-memory / irreversible / architectural?). Then choose:
