@@ -24,12 +24,23 @@
 import { readBoundedStdinJson, recordHookError } from './conversation_utils.ts';
 import { readTranscript, extractAllContent, TranscriptMessage } from './transcript_utils.ts';
 
-// Banned-holding patterns (case-insensitive). Matches the SOP "THE ONE LAW" list.
+// Banned-holding patterns (case-insensitive). Matches the SOP "THE ONE LAW" list +
+// the euphemism catalogue from NEVER_IDLE_ENFORCEMENT_DOCTRINE_2026-06-15.md §4.
+// Jacob 2026-06-15: "bake no idle into the loop, don't just use a different word" —
+// the dressed-up synonyms ("standing by/ready", "holding the line", "no new signal",
+// "not generating busywork", "minimal footprint", "the well is dry") are banned too.
 const HOLDING_RE = new RegExp(
-  'holding' +
-  '|standing by' +
-  '|nothing to do' +
-  "|ready when you'?re up" +
+  'holding(?: the line| pattern| here)?' +
+  '|standing (?:by|ready)' +
+  '|on standby' +
+  "|ready when you'?re (?:up|back)" +
+  '|nothing (?:to do|left|of real value|actionable)' +
+  '|no (?:new )?(?:real )?signal' +
+  '|not (?:generating|manufacturing) busywork' +
+  '|minimal footprint' +
+  '|the well is dry' +
+  '|exhausted (?:the )?(?:autonomous )?work' +
+  "|pivot the moment you'?re back" +
   '|backlog (?:is )?(?:clear|empty)' +
   '|no (?:further )?(?:safe |un-?gated )?(?:work|movement)',
   'i',
