@@ -40,10 +40,22 @@ from memory.store import AUDIT_TABLE_NAME, MemoryStore
 # ---- Tier assignment rules ----
 
 CANDIDATE_ONLY_WRITERS = {"subconscious_haiku"}
-USER_WRITERS = {"user", "manual"}
+# #69 fix (2026-06-15): "manual" REMOVED from the auto-verified set. The
+# conversation-consolidation pass builds MemoryRecords with no explicit writer →
+# schema default writer="manual" → reached verified UNCONDITIONALLY here with no
+# provenance/confidence gate (the poisoning vector). Only writer="user" now takes
+# the verified fast-path; "manual" + the explicit consolidation_pass sentinel are
+# structurally capped at probationary in _assign_tier.
+# NOTE: this is the claude-subconscious WORKER copy (the live worker imports the
+# cache synced from here). Must stay identical to aisys/memory/write_gate.py.
+USER_WRITERS = {"user"}
 KNOWN_WRITERS = CANDIDATE_ONLY_WRITERS | USER_WRITERS | {
-    "sonnet_promoter", "opus_auditor", "system",
+    "sonnet_promoter", "opus_auditor", "system", "manual", "consolidation_pass",
 }
+# #69: low-trust LLM producers capped at probationary (visible-but-flagged, never
+# verified, never candidate). consolidation_pass = the consolidation pass; "manual"
+# = the legacy schema-default writer it fell through to.
+PROBATIONARY_CAPPED_WRITERS = {"consolidation_pass", "manual"}
 
 DEDUP_COSINE_THRESHOLD = 0.92  # cosine sim above which we treat as duplicate
 
@@ -140,6 +152,12 @@ def _assign_tier(
     """
     if writer in CANDIDATE_ONLY_WRITERS:
         return "candidate", ""
+
+    # #69: consolidation_pass / legacy "manual" — low-trust LLM output structurally
+    # capped at probationary (never verified, never candidate). Closes the poisoning
+    # vector where "manual" hit the unconditional verified fast-path below.
+    if writer in PROBATIONARY_CAPPED_WRITERS:
+        return "probationary", ""
 
     if provenance == "user_stated":
         pattern = _user_turn_pattern()

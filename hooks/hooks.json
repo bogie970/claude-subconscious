@@ -45,6 +45,16 @@
           },
           {
             "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/checkin_inject.ts\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/advance_nudge.ts\"",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "python.exe \"C:/Users/jbogi/claude-nodes/hermes/aisys/memory/project_context.py\"",
             "timeout": 5
           },
@@ -74,6 +84,12 @@
           },
           {
             "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/session_latency.ts\"",
+            "timeout": 10,
+            "async": true
+          },
+          {
+            "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/l1_watch.ts\"",
             "timeout": 15,
             "async": true
@@ -83,6 +99,11 @@
             "command": "python.exe \"C:/Users/jbogi/claude-nodes/hermes/aisys/memory/stop_citation_resolution.py\"",
             "timeout": 10,
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-.}/hooks/silent-npx.cjs\" tsx \"${CLAUDE_PLUGIN_ROOT:-.}/scripts/stop_idle_guard.ts\"",
+            "timeout": 10
           }
         ]
       }

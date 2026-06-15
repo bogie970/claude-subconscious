@@ -55,6 +55,7 @@ DO NOT EXTRACT (return nothing for content that is only these):
 - Source-code or file-content pastes (facts ABOUT code are fine, the code itself is not)
 - Tool/system placeholders and truncated fragments that do not carry a complete claim
 - Single transient events that should not persist (one boot timestamp, one TLS error, session IDs)
+If the entire input consists only of the above, return an empty array: []
 
 If there is nothing worth extracting, return an empty array: []
 
@@ -282,9 +283,15 @@ class ConsolidationEngine:
             return result
 
         # Step 2 + 3: Dedup and store each chunk
-        from memory.schema import MemoryRecord, MemoryType
+        from memory.schema import MemoryType  # noqa: F401  (kept for chunk validation parity)
 
-        records_to_insert: list[MemoryRecord] = []
+        # #69 fix: inserts are routed through the write gate (writer="consolidation_pass")
+        # instead of constructing MemoryRecords and persisting them directly via
+        # insert_many/insert. The old direct-insert path BYPASSED write_gate entirely,
+        # so consolidation's llm_inferred chunks could land at verified (the poisoning
+        # vector — ~2,140 rows). The gate structurally caps consolidation_pass at
+        # probationary (visible-but-flagged), exactly like steward_distill/dream_reflector.
+        chunks_to_insert: list[SemanticChunk] = []
 
         for chunk in all_chunks:
             try:
@@ -319,44 +326,47 @@ class ConsolidationEngine:
                         result.errors.append(f"Merge {dedup.existing_id}: {e}")
                     continue
 
-                # action == "insert"
-                record = MemoryRecord(
-                    content=chunk.content,
-                    memory_type=MemoryType(chunk.memory_type),
-                    category=chunk.category,
-                    source="consolidation",
-                    namespace="hermes",
-                    importance=chunk.importance,
-                    tags=chunk.tags,
-                    session_id=session_id,
-                    metadata={"origin": "conversation_consolidation"},
-                )
-                records_to_insert.append(record)
+                # action == "insert" — defer to the gated persist loop below.
+                chunks_to_insert.append(chunk)
 
             except Exception as e:
                 log.warning("Processing chunk failed: %s — %s", chunk.content[:80], e)
                 result.errors.append(f"Chunk processing: {e}")
 
-        # Batch insert WITHOUT A-MEM enrichment — the extraction LLM already
-        # produced high-quality chunks, and the default enrichment path would
-        # use the wrong LLM provider (MCP-unsafe claude-cli or misconfigured default).
-        # Embeddings are still computed over raw content, which is sufficient
-        # since the extraction prompt already produces concise, keyword-rich text.
-        if records_to_insert:
-            try:
-                ids = self._store.insert_many(records_to_insert, enrich=False)
-                result.stored = len(ids)
-                log.info("Stored %d new memories", len(ids))
-            except Exception as e:
-                log.error("Batch insert failed: %s", e)
-                result.errors.append(f"Batch insert: {e}")
-                for record in records_to_insert:
-                    try:
-                        self._store.insert(record, enrich=False)
-                        result.stored += 1
-                    except Exception as e2:
-                        log.warning("Single insert failed: %s", e2)
-                        result.errors.append(f"Single insert: {e2}")
+        # Persist each new chunk THROUGH THE WRITE GATE (#69). The gate assigns the
+        # tier (consolidation_pass → probationary), runs secret-scrub + filesystem
+        # grounding + write-time dedup, and records an audit entry — none of which the
+        # old direct insert_many path did. enrich=False parity is preserved implicitly:
+        # write_memory does not A-MEM-enrich; it embeds raw content, which is what the
+        # extraction prompt already produces (concise, keyword-rich).
+        if chunks_to_insert:
+            from memory.write_gate import WriteRejected, write_memory
+
+            for chunk in chunks_to_insert:
+                try:
+                    write_memory(
+                        self._store,
+                        content=chunk.content,
+                        writer="consolidation_pass",   # #69: capped at probationary in the gate
+                        provenance="llm_inferred",     # extraction output, NOT a user statement
+                        source_ref=f"consolidation:{session_id}",
+                        confidence=chunk.importance,
+                        tags=chunk.tags,
+                        memory_type=MemoryType(chunk.memory_type),
+                        category=chunk.category,
+                        source="consolidation",
+                    )
+                    result.stored += 1
+                except WriteRejected as e:
+                    log.warning("Gate rejected consolidation chunk: %s — %s",
+                                chunk.content[:80], e)
+                    result.errors.append(f"Gate rejected: {e}")
+                except Exception as e:
+                    log.warning("Gated insert failed: %s — %s", chunk.content[:80], e)
+                    result.errors.append(f"Gated insert: {e}")
+
+            log.info("Stored %d new memories (via write gate, tier=probationary)",
+                     result.stored)
 
         return result
 
