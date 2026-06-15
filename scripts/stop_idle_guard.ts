@@ -56,41 +56,62 @@ interface HookInput {
   transcript_path?: string;
 }
 
+function roleOf(m: TranscriptMessage): string {
+  return (m.type || m.message?.role || (m as { role?: string }).role || '') as string;
+}
+
+function contentBlocks(m: TranscriptMessage): unknown[] {
+  const c = m.message?.content ?? (m as { content?: unknown }).content;
+  if (Array.isArray(c)) return c;
+  if (typeof c === 'string') return [{ type: 'text', text: c }];
+  return [];
+}
+
 /**
- * Return the last `assistant` message object from the JSONL transcript.
- * Fail-soft: any error -> null.
+ * A genuine HUMAN prompt = user/human role with NO tool_result blocks. Tool
+ * results are recorded as user-role messages too, so they must NOT be treated
+ * as a turn boundary — only a real human prompt starts a new turn.
  */
-async function lastAssistantEntry(transcriptPath: string): Promise<TranscriptMessage | null> {
+function isHumanPrompt(m: TranscriptMessage): boolean {
+  const r = roleOf(m);
+  if (r !== 'user' && r !== 'human') return false;
+  return !contentBlocks(m).some((b) => (b as { type?: string })?.type === 'tool_result');
+}
+
+/**
+ * All assistant messages of the CURRENT turn (since the last genuine human
+ * prompt), newest first. Fail-soft: any error -> null.
+ * FIX 2026-06-15: previously judged only the single last assistant MESSAGE, so a
+ * real working turn that ended with a text summary mentioning "holding" (zero
+ * tool_use in that final block) false-fired. Now the whole turn is considered.
+ */
+async function currentTurnAssistant(transcriptPath: string): Promise<TranscriptMessage[] | null> {
   try {
     const messages = await readTranscript(transcriptPath);
-    let last: TranscriptMessage | null = null;
-    for (const msg of messages) {
-      const role = msg.type || msg.message?.role || msg.role;
-      if (role === 'assistant') {
-        last = msg;
-      }
+    const turn: TranscriptMessage[] = [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (isHumanPrompt(m)) break;            // start of this turn reached
+      if (roleOf(m) === 'assistant') turn.push(m);
     }
-    return last;
+    return turn.length ? turn : null;          // turn[0] = last assistant message
   } catch {
     return null;
   }
 }
 
 /**
- * True iff the turn has banned-holding text AND zero tool_use blocks.
- * A turn WITH any tool call is never a violation, even if its text says
- * "holding".
+ * True iff the WHOLE turn made ZERO tool calls AND its final assistant text
+ * matches the banned-holding regex. Any tool_use anywhere in the turn -> the
+ * turn did real work -> never a violation.
  */
-function isViolation(entry: TranscriptMessage): boolean {
-  const extracted = extractAllContent(entry);
-  if (extracted.toolUses.length > 0) {
-    return false; // any tool call -> never a violation
+function isViolation(turn: TranscriptMessage[]): boolean {
+  for (const m of turn) {
+    if (extractAllContent(m).toolUses.length > 0) return false; // real work done
   }
-  const text = extracted.text;
-  if (!text || !text.trim()) {
-    return false;
-  }
-  return HOLDING_RE.test(text);
+  const lastText = extractAllContent(turn[0]).text; // turn[0] = last assistant msg
+  if (!lastText || !lastText.trim()) return false;
+  return HOLDING_RE.test(lastText);
 }
 
 function emit(text: string): void {
@@ -113,11 +134,11 @@ async function main(): Promise<void> {
   if (!path) {
     return; // fail-open
   }
-  const entry = await lastAssistantEntry(path);
-  if (!entry) {
+  const turn = await currentTurnAssistant(path);
+  if (!turn) {
     return; // fail-open
   }
-  if (isViolation(entry)) {
+  if (isViolation(turn)) {
     emit(INJECTION);
   }
 }
