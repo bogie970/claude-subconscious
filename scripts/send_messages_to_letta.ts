@@ -59,6 +59,36 @@ interface HookInput {
   hook_event_name?: string;
 }
 
+// --- Ecosystem-cwd gate (mirror of aisys/subconscious/ecosystem_gate.py) -----
+// Legit ecosystem agents (hermes, atlas, daedalus) all live under claude-nodes/.
+// Match Windows + WSL forms, any slash direction, any case.
+const ECOSYSTEM_ROOTS = [
+  'c:/users/jbogi/claude-nodes',       // native Windows
+  '/mnt/c/users/jbogi/claude-nodes',   // WSL mount of the same path
+];
+
+function normalizeCwd(cwd: string): string {
+  let s = cwd.trim().replace(/\\/g, '/').toLowerCase();
+  s = s.replace(/\/+/g, '/');   // collapse duplicate slashes
+  s = s.replace(/\/+$/g, '');   // strip trailing slashes
+  return s;
+}
+
+function cwdIsMissing(cwd: string | undefined | null): boolean {
+  // "." is not a sentinel on the TS side (hook always supplies a real cwd),
+  // but guard empty/whitespace/undefined anyway.
+  return cwd == null || cwd.trim() === '';
+}
+
+function isEcosystemCwd(cwd: string | undefined | null): boolean {
+  // Override hatch — always write.
+  if (process.env.HERMES_MEMORY_ALLOW_ANY_CWD === '1') return true;
+  // Fail-safe: missing/empty cwd -> WRITE (caller warns).
+  if (cwdIsMissing(cwd)) return true;
+  const norm = normalizeCwd(cwd as string);
+  return ECOSYSTEM_ROOTS.some(root => norm === root || norm.startsWith(root + '/'));
+}
+
 interface LocalPayload {
   sessionId: string;
   cwd: string;
@@ -212,6 +242,24 @@ async function main(): Promise<void> {
     if (hookInput.stop_hook_active) {
       log('Stop hook already active, exiting to prevent loop');
       process.exit(0);
+    }
+
+    // --- Ecosystem-cwd gate (primary, earliest skip) ----------------------
+    // The hermes-memory plugin is enabled GLOBALLY, so this Stop hook fires in
+    // EVERY Claude Code session on the machine and would otherwise write
+    // candidate memories into the ONE shared store for unrelated chats. Only
+    // dispatch the subconscious extractor for Hermes-ecosystem sessions (cwd
+    // under claude-nodes/, covering hermes/atlas/daedalus). Gating here — before
+    // reading the transcript and spawning the Python worker — also saves compute.
+    // FAIL-SAFE: missing/empty cwd -> proceed (write) + warn; cost asymmetry is
+    // breaking all Hermes extraction >> a little pollution. Mirrors the Python
+    // gate in aisys/subconscious/ecosystem_gate.py — keep the two in sync.
+    if (!isEcosystemCwd(hookInput.cwd)) {
+      log(`subconscious: non-ecosystem cwd ${JSON.stringify(hookInput.cwd)}, skipping memory write`);
+      process.exit(0);
+    }
+    if (cwdIsMissing(hookInput.cwd)) {
+      log(`subconscious: cwd missing/empty (${JSON.stringify(hookInput.cwd)}) — proceeding (fail-safe write)`);
     }
 
     log(`Reading transcript from: ${hookInput.transcript_path}`);

@@ -260,6 +260,22 @@ def main(payload_path: str | None = None) -> None:
     log.info("Session: %s, cwd: %s", session_id, cwd)
     log.info("Transcript length: %d chars", len(transcript_xml))
 
+    # --- Ecosystem-cwd gate (#80) ------------------------------------------
+    # The plugin is enabled GLOBALLY, so this worker runs in EVERY Claude Code
+    # session machine-wide and writes to the ONE shared store. Only allow memory
+    # writes for Hermes-ecosystem sessions (cwd under claude-nodes/ — covers
+    # hermes/atlas/daedalus); an unrelated chat opened elsewhere is skipped so it
+    # cannot pollute Hermes memory. Fail-safe: missing cwd -> WRITE + warn.
+    # See ecosystem_gate.py for the full rationale + the ALLOW_ANY_CWD override.
+    from .ecosystem_gate import is_ecosystem_cwd, cwd_is_missing
+    if not is_ecosystem_cwd(cwd):
+        log.warning("subconscious: non-ecosystem cwd %r — skipping memory write", cwd)
+        _update_state(state_file, new_last_index)
+        _cleanup_payload(payload_path)
+        return
+    if cwd_is_missing(cwd):
+        log.warning("subconscious: cwd missing/empty from payload — writing anyway (fail-safe)")
+
     # Singleton check via exclusive file lock (released implicitly on process exit)
     with ExitStack() as stack:
         if not _acquire_worker_lock(cwd, stack):
