@@ -218,6 +218,11 @@ class MemoryStore:
         where_clauses = []
         if not include_archived:
             where_clauses.append("archived = false")
+            # Bitemporal (#76): exclude SUPERSEDED rows (non-empty valid_to) from
+            # default retrieval (mirrors aisys/memory/store.py — keep the two in sync).
+            # Bypassed under include_archived so as-of/archive scope still sees the chain.
+            if self._has_v2_schema():
+                where_clauses.append("(valid_to = '' OR valid_to IS NULL)")
         if tier is not None:
             tier_list = ", ".join(f"'{_sanitize(t)}'" for t in tier)
             where_clauses.append(f"tier IN ({tier_list})")
