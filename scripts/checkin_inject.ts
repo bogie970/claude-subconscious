@@ -84,6 +84,24 @@ function resolveNode(input: HookInput | null): string | null {
   return null;
 }
 
+/**
+ * #D13 — Per-node primary-session pin. If <RUNTIME_DIR>/<node>_primary_session
+ * exists and names a session id, ONLY that session may handle the node's
+ * markers — disambiguates multiple same-node sessions (e.g. CLI-hermes vs
+ * desktop-hermes, both node=hermes, where D12 alone lets first-to-turn win).
+ * Fail-open: missing / empty / unreadable pin => no gating (pure D12 behavior),
+ * so check-ins are never permanently stranded if the pin is absent.
+ */
+function isPrimarySession(node: string, sessionId: string | undefined): boolean {
+  try {
+    const pin = fs.readFileSync(path.join(RUNTIME_DIR, `${node}_primary_session`), 'utf-8').trim();
+    if (!pin) return true;                       // empty pin => no gate
+    return !!sessionId && sessionId === pin;     // gated: this session must BE the pinned primary
+  } catch {
+    return true;                                 // no pin file => fail-open (D12 behavior)
+  }
+}
+
 async function readHookInput(): Promise<HookInput | null> {
   return new Promise((resolve) => {
     let input = '';
@@ -129,6 +147,12 @@ async function main(): Promise<void> {
   // #D12: a session that resolves to no known node (e.g. the C:\ control room)
   // must NEVER consume a node's check-in / dispatch markers. Bail early.
   if (node === null) {
+    return;
+  }
+
+  // #D13: when a primary session is pinned for this node, NON-primary sessions
+  // of the same node must not consume its markers — they wait for the primary.
+  if (!isPrimarySession(node, input ? input.session_id : undefined)) {
     return;
   }
 
