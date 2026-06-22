@@ -85,21 +85,44 @@ function resolveNode(input: HookInput | null): string | null {
 }
 
 /**
- * #D13 — Per-node primary-session pin. If <RUNTIME_DIR>/<node>_primary_session
- * exists and names a session id, ONLY that session may handle the node's
- * markers — disambiguates multiple same-node sessions (e.g. CLI-hermes vs
- * desktop-hermes, both node=hermes, where D12 alone lets first-to-turn win).
- * Fail-open: missing / empty / unreadable pin => no gating (pure D12 behavior),
- * so check-ins are never permanently stranded if the pin is absent.
+ * #D13 — Per-node primary-session pin. If <node>_primary_session exists and
+ * names a session id, ONLY that session may handle the node's markers —
+ * disambiguates multiple same-node sessions (e.g. CLI-hermes vs desktop-hermes,
+ * both node=hermes, where D12 alone lets first-to-turn win).
+ *
+ * #D14 HARDENING (2026-06-22) — the gate is a SAFETY gate, so its failure mode
+ * matters. The pre-D14 code fail-OPENED on ANY readFileSync error, so a
+ * RUNTIME_DIR override (HERMES_RUNTIME_DIR) pointing at a dir WITHOUT the pin
+ * would make a NON-primary CLI session read-throw → fail-open → surface (leak).
+ * Fix: read the pin from BOTH the active RUNTIME_DIR and the DEFAULT
+ * ~/.hermes/runtime path. If a pin EXISTS at either location:
+ *   - gate against it: this session must BE the pinned id (mismatch ⇒ SUPPRESS,
+ *     i.e. fail-CLOSED for non-primary).
+ * Only when NO pin file exists at EITHER path do we fail-OPEN (pure D12
+ * behavior) — so a real check-in is NEVER permanently stranded by an absent pin.
+ * Empty pin still ⇒ no gate (explicit "unpin").
  */
 function isPrimarySession(node: string, sessionId: string | undefined): boolean {
-  try {
-    const pin = fs.readFileSync(path.join(RUNTIME_DIR, `${node}_primary_session`), 'utf-8').trim();
-    if (!pin) return true;                       // empty pin => no gate
-    return !!sessionId && sessionId === pin;     // gated: this session must BE the pinned primary
-  } catch {
-    return true;                                 // no pin file => fail-open (D12 behavior)
+  const DEFAULT_RUNTIME_DIR = path.join(os.homedir(), '.hermes', 'runtime');
+  // Candidate dirs: the active RUNTIME_DIR first, then the default (dedup'd).
+  const dirs = RUNTIME_DIR === DEFAULT_RUNTIME_DIR
+    ? [RUNTIME_DIR]
+    : [RUNTIME_DIR, DEFAULT_RUNTIME_DIR];
+
+  for (const dir of dirs) {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(path.join(dir, `${node}_primary_session`), 'utf-8');
+    } catch {
+      continue;                                   // no pin in this dir — try next
+    }
+    const pin = raw.trim();
+    if (!pin) return true;                         // explicit empty pin => no gate
+    // A pin EXISTS for this node. Gate strictly: this session must BE it.
+    return !!sessionId && sessionId === pin;
   }
+  // No pin file at ANY candidate path => fail-open (D12): never strand a checkin.
+  return true;
 }
 
 /**
