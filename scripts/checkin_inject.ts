@@ -102,6 +102,29 @@ function isPrimarySession(node: string, sessionId: string | undefined): boolean 
   }
 }
 
+/**
+ * #89 (defensive consumer layer) — scan a task's text for an EXPLICIT leading
+ * addressee (text-<node> / "<node>," / "hey <node>" / "tell <node>" / "to <node>:")
+ * and return that node, or null when none is unambiguously present. Mirrors the
+ * backend's _resolve_task_agent — conservative, addressee-only (NO topic match),
+ * head-anchored. Fail-open: any miss returns null so we never mislabel.
+ */
+function resolveTaskAddressee(text: string | undefined): string | null {
+  if (!text) return null;
+  const nodes = Array.from(KNOWN_AGENTS).join('|');
+  const head = text.slice(0, 60).toLowerCase().replace(/^\s+/, '');
+  let m = head.match(new RegExp(`\\btext-(${nodes})\\b`));
+  if (m) return m[1];
+  const pats = [
+    new RegExp(`^(?:hey|hi|hello|ok|okay)\\s+(${nodes})\\b`),
+    new RegExp(`^tell\\s+(${nodes})\\b`),
+    new RegExp(`^to\\s+(${nodes})\\s*[:,]`),
+    new RegExp(`^(${nodes})\\s*[:,]`),
+  ];
+  for (const p of pats) { m = head.match(p); if (m) return m[1]; }
+  return null;
+}
+
 async function readHookInput(): Promise<HookInput | null> {
   return new Promise((resolve) => {
     let input = '';
@@ -216,7 +239,15 @@ async function main(): Promise<void> {
       const sid = dm.sid || 'unknown';
       const task = dm.task || '(no task text)';
       const taskId = dm.task_id || '?';
-      parts.push(`[Voice task — ${sid}] Jacob asked (via voice): "${task}" (task_id=${taskId}). Pick it up.`);
+      // #89 defensive: if the task text EXPLICITLY addresses a DIFFERENT node than
+      // this session, surface it as mis-addressed instead of "Pick it up." Fail-open:
+      // addressee===null or ===node → normal banner (no false reroutes).
+      const addressee = resolveTaskAddressee(dm.task);
+      if (addressee && addressee !== node) {
+        parts.push(`[Voice task — ${sid}] (NOTE: this task is addressed to ${addressee}, not you — skip or reroute) "${task}" (task_id=${taskId}).`);
+      } else {
+        parts.push(`[Voice task — ${sid}] Jacob asked (via voice): "${task}" (task_id=${taskId}). Pick it up.`);
+      }
       emittedSid = dm.sid;
     }
   } catch { /* silent no-op */ }
