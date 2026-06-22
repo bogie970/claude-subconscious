@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawnSync } from 'child_process';
+import { spawnSync, spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { buildPythonSubprocessEnv, getMode, getTempStateDir, readBoundedStdinJson, recordHookError } from './conversation_utils.ts';
 import { getConfig } from './config.ts';
@@ -23,6 +23,8 @@ const RECENT_MARKER_WINDOW_MS = 5 * 60 * 1000;  // 5 minutes
 const SYNC_TIMEOUT_MS = 45_000;
 const EVICT_FRACTION = parseFloat(process.env.HERMES_L1_EVICT_FRACTION ?? '0.5');
 const PIN_RECENT = parseInt(process.env.HERMES_L1_PIN_RECENT ?? '20');
+// D11 Edit B: bounded timeout for the one-shot compaction steward rebuild (ms).
+const STEWARD_REBUILD_TIMEOUT_MS = parseInt(process.env.STEWARD_COMPACT_REBUILD_TIMEOUT_MS ?? '120000');
 
 const TEMP_STATE_DIR = getTempStateDir();
 const LOG_FILE = path.join(TEMP_STATE_DIR, 'precompact_safety.log');
@@ -105,6 +107,66 @@ function runSyncEviction(
   }
 }
 
+/**
+ * D11 Edit B — rebuild the steward block AT the compaction event (one-shot).
+ *
+ * Fire-and-forget spawn of `python -m lcw.steward.runner --agent hermes`, which
+ * runs recompile_from_state(agent="hermes") over the post-eviction L1 tail +
+ * previous window + shared L2 and atomic-writes steward_window.json. This is a
+ * ONE-SHOT subprocess (NOT a daemon): it exits after the single compile.
+ *
+ * NEVER blocks compaction: detached + unref'd, wrapped in try/catch, and given a
+ * bounded kill-timer so a wedged compile cannot linger. Any failure is logged and
+ * swallowed — the eviction (above) and emitContinue() are unaffected.
+ *
+ * hermesRoot resolution: `lcw` lives in the hermes REPO, not the plugin root, so
+ * cfg.hermesRoot (hardcoded to PLUGIN_ROOT in config.ts) cannot be trusted. Prefer
+ * the hermes.config.json `hermesRoot` field, then HERMES_ROOT env.
+ */
+function spawnStewardRebuildAsync(pythonPath: string): void {
+  try {
+    // Resolve the hermes repo root (where the lcw package resolves), reading the
+    // config file's hermesRoot directly (getConfig() ignores it) then env.
+    let hermesRoot = process.env.HERMES_ROOT || '';
+    if (!hermesRoot) {
+      try {
+        const cfgFile = path.join(path.resolve(__dirname, '..'), 'hermes.config.json');
+        if (fs.existsSync(cfgFile)) {
+          const j = JSON.parse(fs.readFileSync(cfgFile, 'utf-8'));
+          if (typeof j.hermesRoot === 'string' && j.hermesRoot) hermesRoot = j.hermesRoot;
+        }
+      } catch { /* fall through */ }
+    }
+    if (!hermesRoot) {
+      log('steward rebuild skipped: could not resolve HERMES_ROOT (fail-soft)');
+      return;
+    }
+    const env = buildPythonSubprocessEnv({ PYTHONPATH: hermesRoot });
+    const child = spawn(pythonPath, [
+      '-m', 'lcw.steward.runner',
+      '--agent', 'hermes',
+    ], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: hermesRoot,
+      env,
+      windowsHide: true,
+    });
+    // Bounded timeout: SIGKILL a wedged compile so it never lingers. The timer is
+    // unref'd so it does not hold this hook open.
+    const killTimer = setTimeout(() => {
+      try { if (child.pid) process.kill(child.pid, 'SIGKILL'); } catch { /* gone */ }
+    }, STEWARD_REBUILD_TIMEOUT_MS);
+    if (typeof killTimer.unref === 'function') killTimer.unref();
+    child.on('exit', () => { try { clearTimeout(killTimer); } catch { /* noop */ } });
+    child.unref();  // do not hold the hook open
+    log(`steward rebuild spawned pid=${child.pid} (compaction-only, one-shot)`);
+  } catch (e) {
+    // Fail-soft: a rebuild failure must never block or crash compaction.
+    log(`steward rebuild spawn failed (fail-soft): ${e}`);
+  }
+}
+
 function emitContinue(): void {
   // PreCompact hook never blocks. Always pass through.
   process.stdout.write(JSON.stringify({ continue: true }) + '\n');
@@ -153,6 +215,11 @@ async function main(): Promise<void> {
     markerDir,
     hookInput.session_id,
   );
+
+  // D11 Edit B — AFTER the eviction, rebuild the steward block one-shot so the
+  // window recomputes ONLY at compaction (per D11 §1). Fail-soft; the helper never
+  // throws out and never blocks the emitContinue() below.
+  spawnStewardRebuildAsync(cfg.pythonPath);
 
   emitContinue();
 }

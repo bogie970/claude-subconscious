@@ -44,6 +44,17 @@ class EmbeddingService:
         self._model = None
         self._model_name = model_name
         self._device = device
+        # Resilient device: if cuda is requested but unavailable (a cpu-only torch
+        # build, or a stale HERMES_EMBED_DEVICE=cuda env), fall back to cpu instead
+        # of crashing the embed path. A crash here yields 0 candidates -> an empty
+        # memory block / lost L1->L2 capture, worse than a slower cpu embed. (2026-06-21)
+        if "cuda" in str(self._device).lower():
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    self._device = "cpu"
+            except Exception:
+                self._device = "cpu"
         self._revision = revision
         self._lock = threading.Lock()
         # Daemon client — lazy-initialized
